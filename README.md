@@ -50,6 +50,8 @@ chmod +x rmtree
 - `--uuid`, `-u` - Show document UUIDs in square brackets (documents only, not folders)
 - `--no-color`, `-n` - Disable colored output
 - `--version`, `-v` - Show version information
+- `--symlinks`, `-s` - Create symbolic links instead of printing
+- `--output`, `-o` - Output path for symbolic links (default `.`)
 
 ## Examples
 
@@ -91,4 +93,27 @@ chmod +x rmtree
 ├── Calendar
 │   └── Calendar-2025 [67f60935-7978-4fe4-b234-64b70ed17c3e]
 └── To Do [d1a44483-3023-4b16-b677-ea75211252ca]
+```
+
+### Symlink mode
+When invoked with `--symlinks` (or `-s`), `rmtree` will create a directory tree under the path given by `--output` (or `-o`) and create symbolic links that point back to the original files in the reMarkable data directory.
+
+- File names are created using the display names and the appropriate extension is appended if missing.
+- Only `.pdf` and `.epub` files are symlinked; notebooks are skipped.
+
+This is useful if you want to mirror the reMarkable folder structure in a directory structure that can be browsed by other tools such as [KOReader](https://github.com/koreader/koreader).
+
+**Example**
+```
+$ mkdir reMarkable
+$ rmtree -s -o reMarkable/
+2 directories, 2 files
+$ ls -R reMarkable
+Books    Calendar
+
+reMarkable/Books:
+Project\ Hail\ Mary.epub
+
+reMarkable/Calendar:
+Calendar-2025.pdf
 ```
