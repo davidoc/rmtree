@@ -22,20 +22,22 @@ type Metadata struct {
 }
 
 type Item struct {
-	UUID     string
-	Name     string
-	Type     string
-	Parent   string
-	DocType  string
-	SortKey  string
+	UUID    string
+	Name    string
+	Type    string
+	Parent  string
+	DocType string
+	SortKey string
 }
 
 type Config struct {
-	Path      string
-	ShowIcons bool
+	Path       string
+	OutputPath string
+	ShowIcons  bool
 	ShowLabels bool
-	ShowUUID  bool
-	UseColor  bool
+	ShowUUID   bool
+	UseColor   bool
+	SymLink    bool
 }
 
 var colors = map[string]string{
@@ -53,6 +55,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if _, err := os.Stat(config.OutputPath); config.SymLink && os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error: Output Path '%s' does not exist\n", config.OutputPath)
+		os.Exit(1)
+	}
+
 	items, err := loadItems(config.Path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading items: %v\n", err)
@@ -62,13 +69,18 @@ func main() {
 	children := buildChildrenMap(items)
 	sortItems(items, children)
 
-	printTree(items, children, config)
+	if config.SymLink {
+		linkTree(items, children, config)
+	} else {
+		printTree(items, children, config)
+	}
 }
 
 func parseArgs() Config {
 	config := Config{
-		Path:     "/home/root/.local/share/remarkable/xochitl",
-		UseColor: true,
+		Path:       "/home/root/.local/share/remarkable/xochitl",
+		OutputPath: ".",
+		UseColor:   true,
 	}
 
 	pflag.BoolVarP(&config.ShowIcons, "icons", "i", false, "Show emoji icons")
@@ -76,6 +88,8 @@ func parseArgs() Config {
 	pflag.BoolVarP(&config.ShowUUID, "uuid", "u", false, "Show document UUIDs")
 	noColor := pflag.BoolP("no-color", "n", false, "Disable colored output")
 	showVersion := pflag.BoolP("version", "v", false, "Show version information")
+	pflag.BoolVarP(&config.SymLink, "symlinks", "s", false, "Create symbolic links instead of printing")
+	pflag.StringVarP(&config.OutputPath, "output", "o", ".", "Output path for symbolic links")
 	pflag.Parse()
 
 	if *showVersion {
@@ -361,4 +375,126 @@ func getItemFormatting(item *Item, config Config) (icon, color, typeLabel, uuidD
 	}
 
 	return
+}
+
+// Create symbolic links of the flat structure into a tree structure of filesystem files and directories.
+func linkTree(items map[string]*Item, children map[string][]*Item, config Config) {
+	roots := children["root"]
+	trashItems := children["trash"]
+
+	dirCount := 0
+	fileCount := 0
+
+	for _, item := range items {
+		if item.Type == "CollectionType" {
+			dirCount++
+		} else {
+			fileCount++
+		}
+	}
+
+	// Link root items
+	for i, item := range roots {
+		isLast := i == len(roots)-1 && len(trashItems) == 0
+		linkItem(item, "", isLast, 0, children, config)
+	}
+
+	// Print summary
+	dirText := "directories"
+	if dirCount == 1 {
+		dirText = "directory"
+	}
+
+	fileText := "files"
+	if fileCount == 1 {
+		fileText = "file"
+	}
+
+	fmt.Printf("%d %s, %d %s\n", dirCount, dirText, fileCount, fileText)
+}
+
+func linkItem(item *Item, prefix string, isLast bool, depth int, children map[string][]*Item, config Config) {
+	if depth > 50 {
+		return
+	}
+
+	itemName := item.Name
+	//Remove leading and trailing space from directory name
+	itemName = strings.Trim(itemName, " ")
+
+	// Create directory or symlink
+	if item.Type == "CollectionType" {
+		// Create directory
+		dirPath := filepath.Join(config.OutputPath, prefix, itemName)
+		err := os.MkdirAll(dirPath, os.ModePerm)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating directory '%s': %v\n", dirPath, err)
+			return
+		}
+		// fmt.Fprintf(os.Stdout, "Created directory '%s'\n", dirPath)
+	} else if item.Type == "DocumentType" {
+		// Create symlink
+		srcPath := ""
+		switch item.DocType {
+		case "epub":
+			srcPath = filepath.Join(config.Path, item.UUID+".epub")
+		case "pdf":
+			srcPath = filepath.Join(config.Path, item.UUID+".pdf")
+		default:
+			return // Skip for symlinking
+		}
+
+		destDir := filepath.Join(config.OutputPath, prefix)
+		_, err := os.Stat(destDir)
+		if os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "Error: Path '%s' does not exist\n", destDir)
+			return
+		}
+
+		fileName := itemName
+		// Sanitize filename
+		fileName = strings.ReplaceAll(fileName, string(os.PathSeparator), "_")
+		// Append file extension if missing
+		if !strings.HasSuffix(fileName, "."+item.DocType) {
+			fileName += "." + item.DocType
+		}
+
+		destPath := filepath.Join(destDir, fileName)
+
+		err = createOrReplaceSymlink(srcPath, destPath)
+
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating symlink from '%s' to '%s': %v\n", srcPath, destPath, err)
+			return
+		}
+		// fmt.Fprintf(os.Stdout, "Created symlink from '%s' to '%s'\n", srcPath, destPath)
+	}
+
+	// Link children
+	itemChildren := children[item.UUID]
+	for i, child := range itemChildren {
+		childIsLast := i == len(itemChildren)-1
+
+		newPrefix := prefix
+		newPrefix += itemName + string(os.PathSeparator)
+
+		linkItem(child, newPrefix, childIsLast, depth+1, children, config)
+	}
+}
+
+// createOrReplaceSymlink creates a symlink, replacing an existing symlink at linkPath if present.
+// It will not remove a regular file/dir unless you want that behaviour.
+func createOrReplaceSymlink(target, linkPath string) error {
+	// if a symlink exists, remove it
+	if fi, err := os.Lstat(linkPath); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			if err := os.Remove(linkPath); err != nil {
+				return err
+			}
+		} else {
+			// exists and is not a symlink — decide whether to fail or remove
+			return fmt.Errorf("path exists and is not a symlink: %s", linkPath)
+		}
+	}
+	return os.Symlink(target, linkPath)
 }
